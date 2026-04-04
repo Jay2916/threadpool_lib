@@ -1,20 +1,26 @@
 #include <stdio.h>
 #include "threadpool.h"
 #include <unistd.h>
+#include <stdlib.h>
+#include <stdbool.h>
 
 void hello(void* arg){
     char *s = arg;
+    sleep(1);
     printf("%s\n", s);
     return;
 }
 int main(){
     threadpool *tp = threadpool_create(3);
-    threadpool_submit(tp, hello, "hello1");
-    threadpool_submit(tp, hello, "hello2");
-    threadpool_submit(tp, hello, "hello3");
-    threadpool_submit(tp, hello, "hello4");
-    threadpool_submit(tp, hello, "hello5");
-    threadpool_submit(tp, hello, "hello6");
-    threadpool_destory(tp);
+    char *c;
+    for(int i = 0; i < 10; i++){
+        c = calloc(100, sizeof(char));
+        snprintf(c,100, "hello %d", i);
+        threadpool_submit(tp, hello, c);
+        //sleep(1);
+    }
+    
+    threadpool_destroy(tp, false);
+    free(c);
     return 0;
 }

@@ -6,3 +6,6 @@ libthreadpool.so : threadpool.c
 
 test : libthreadpool.so test.c
 	gcc test.c  -o test -L. -lthreadpool -o test
+
+chatgpt_test: chatgpt_test.c threadpool.c
+	gcc chatgpt_test.c -L. -lthreadpool -lpthread -o chatgpt_test

@@ -4,22 +4,24 @@
 #include <unistd.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <semaphore.h>
 #include "../util/queue.h"
 #include "threadpool.h"
 
 #define MAX 100
-#define TIME 1
 
 struct job_t{
     void (*function)(void*);
     void *arg;
 };
 
+typedef enum STOP_COND{FALSE, IMMEDIATE, GRACEFULL} STOP_COND;
 struct threadpool{
-    atomic_int stop;
-    sem_t avaiable_jobs;
-    pthread_mutex_t *mutex;
+    STOP_COND stop;
+    pthread_cond_t cond;
+    sem_t avaiable_slots;
+    pthread_mutex_t mutex;
     int nthread;
     Queue *job_queue;
     pthread_t *thread;
@@ -28,33 +30,40 @@ struct threadpool{
 void* worker_routine(void* arg){
     threadpool *tp = (threadpool*)arg;
     job_t job;
-    int status;
-    while(1){
-        sem_wait(&tp->avaiable_jobs);
-        pthread_mutex_lock(tp->mutex);
-        status = dequeue(tp->job_queue, &job);
-        pthread_mutex_unlock(tp->mutex);
-        if(status == Q_OKAY){
-            job.function(job.arg);
+    
+    while(true){
+        pthread_mutex_lock(&tp->mutex);
+        while(is_empty(tp->job_queue) && (tp->stop == FALSE) ){
+            pthread_cond_wait(&tp->cond, &tp->mutex);
         }
-        else if(status == Q_EMPTY && atomic_load(&tp->stop)){
+        if(tp->stop == IMMEDIATE || (tp->stop == GRACEFULL && is_empty(tp->job_queue))){
+            pthread_mutex_unlock(&tp->mutex);
             break;
         }
+        dequeue(tp->job_queue, &job);
+        pthread_mutex_unlock(&tp->mutex);
+        job.function(job.arg);
+        sem_post(&tp->avaiable_slots);
     }
     return NULL;
+    
 }
-threadpool* threadpool_create(int n){
+
+//mem leak: if one of the allocation call fails others have to be freed 
+//assumed no failed allocations
+threadpool* threadpool_create(int n){ 
     threadpool* tp = (threadpool*)malloc(sizeof(threadpool));
     if(tp == NULL){
         return NULL;
     }
-    atomic_store(&tp->stop, 0);
     tp->nthread = 0;
-    sem_init(&tp->avaiable_jobs,0, 0);
+    tp->stop = FALSE;
+    pthread_cond_init(&tp->cond, NULL);
+    sem_init(&tp->avaiable_slots, 0, MAX);
     tp->job_queue = create_queue(MAX, sizeof(job_t));
     tp->thread = (pthread_t*)calloc(n, sizeof(pthread_t));
-    tp->mutex = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
-    pthread_mutex_init(tp->mutex, NULL);
+    pthread_mutex_init(&tp->mutex, NULL);
+
     if(tp->job_queue == NULL || tp->thread == NULL){
         return NULL;
     }
@@ -66,36 +75,34 @@ threadpool* threadpool_create(int n){
     return tp;
 }
 
-void threadpool_submit(threadpool* tp, void (*function)(void*), void* arg){
-    int status;
+//blocking submit: induces backpressure in queue
+//can be made non blocking which returns error on Q_FULL
+//some other ways to manage backpressure: unbounded queue(bad for general purpore threadpools, make user thread execute job when queue full)
+void threadpool_submit(threadpool* tp, void (*function)(void*), void* arg){ 
     job_t job = {function, arg};
-    do{
-        pthread_mutex_lock(tp->mutex);
-        status = enqueue(tp->job_queue, &job);
-        pthread_mutex_unlock(tp->mutex);
-        if(status == Q_FULL) sleep(TIME);
-    }while(status != Q_OKAY);
-    sem_post(&tp->avaiable_jobs);
-}
+    sem_wait(&tp->avaiable_slots);
 
-void threadpool_wait(threadpool* tp){
+    pthread_mutex_lock(&tp->mutex);
+    enqueue(tp->job_queue, &job);
+    pthread_mutex_unlock(&tp->mutex);
+    pthread_cond_signal(&tp->cond);
 
 }
 
-void threadpool_destory(threadpool* tp){
-    atomic_store(&tp->stop, 1);
-    for(int i = 0; i < tp->nthread;i++){
-        sem_post(&tp->avaiable_jobs);
-    }
+void threadpool_destroy(threadpool* tp, bool immediate_shutdown){ 
+    pthread_mutex_lock(&tp->mutex);
+    tp->stop = (immediate_shutdown)? IMMEDIATE : GRACEFULL;
+    pthread_mutex_unlock(&tp->mutex);
+    pthread_cond_broadcast(&tp->cond);
     for(int i = 0;i<tp->nthread;i++){
         pthread_join(tp->thread[i], NULL);
         printf("Thread %d joined.\n",i);
     }
-    sem_destroy(&tp->avaiable_jobs);
-    pthread_mutex_destroy(tp->mutex);
+    sem_destroy(&tp->avaiable_slots);
+    pthread_mutex_destroy(&tp->mutex);
+    pthread_cond_destroy(&tp->cond);
     destroy_queue(tp->job_queue);
     free(tp->thread);
-    free(tp->mutex);
     free(tp);
 }
 
