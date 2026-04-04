@@ -19,8 +19,8 @@ int main(){
         threadpool_submit(tp, hello, c);
         //sleep(1);
     }
-    
-    threadpool_destroy(tp, false);
+    sleep(2);
+    threadpool_destroy(tp, true);
     free(c);
     return 0;
 }

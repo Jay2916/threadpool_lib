@@ -19,8 +19,8 @@ struct job_t{
 typedef enum STOP_COND{FALSE, IMMEDIATE, GRACEFULL} STOP_COND;
 struct threadpool{
     STOP_COND stop;
-    pthread_cond_t cond;
-    sem_t avaiable_slots;
+    pthread_cond_t enqueue_cond;
+    pthread_cond_t dequeue_cond;
     pthread_mutex_t mutex;
     int nthread;
     Queue *job_queue;
@@ -34,16 +34,16 @@ void* worker_routine(void* arg){
     while(true){
         pthread_mutex_lock(&tp->mutex);
         while(is_empty(tp->job_queue) && (tp->stop == FALSE) ){
-            pthread_cond_wait(&tp->cond, &tp->mutex);
+            pthread_cond_wait(&tp->enqueue_cond, &tp->mutex);
         }
         if(tp->stop == IMMEDIATE || (tp->stop == GRACEFULL && is_empty(tp->job_queue))){
             pthread_mutex_unlock(&tp->mutex);
             break;
         }
         dequeue(tp->job_queue, &job);
+        pthread_cond_signal(&tp->dequeue_cond);
         pthread_mutex_unlock(&tp->mutex);
         job.function(job.arg);
-        sem_post(&tp->avaiable_slots);
     }
     return NULL;
     
@@ -58,8 +58,8 @@ threadpool* threadpool_create(int n){
     }
     tp->nthread = 0;
     tp->stop = FALSE;
-    pthread_cond_init(&tp->cond, NULL);
-    sem_init(&tp->avaiable_slots, 0, MAX);
+    pthread_cond_init(&tp->enqueue_cond, NULL);
+    pthread_cond_init(&tp->dequeue_cond, NULL);
     tp->job_queue = create_queue(MAX, sizeof(job_t));
     tp->thread = (pthread_t*)calloc(n, sizeof(pthread_t));
     pthread_mutex_init(&tp->mutex, NULL);
@@ -75,17 +75,20 @@ threadpool* threadpool_create(int n){
     return tp;
 }
 
-//blocking submit: induces backpressure in queue
+//blocking submit => induces backpressure in queue
 //can be made non blocking which returns error on Q_FULL
 //some other ways to manage backpressure: unbounded queue(bad for general purpore threadpools, make user thread execute job when queue full)
 void threadpool_submit(threadpool* tp, void (*function)(void*), void* arg){ 
     job_t job = {function, arg};
-    sem_wait(&tp->avaiable_slots);
 
     pthread_mutex_lock(&tp->mutex);
+    while(is_full(tp->job_queue) && tp->stop == FALSE){
+        pthread_cond_wait(&tp->dequeue_cond, &tp->mutex);
+    }
     enqueue(tp->job_queue, &job);
+    pthread_cond_signal(&tp->enqueue_cond);
     pthread_mutex_unlock(&tp->mutex);
-    pthread_cond_signal(&tp->cond);
+    
 
 }
 
@@ -93,14 +96,15 @@ void threadpool_destroy(threadpool* tp, bool immediate_shutdown){
     pthread_mutex_lock(&tp->mutex);
     tp->stop = (immediate_shutdown)? IMMEDIATE : GRACEFULL;
     pthread_mutex_unlock(&tp->mutex);
-    pthread_cond_broadcast(&tp->cond);
+    pthread_cond_broadcast(&tp->enqueue_cond);
+    pthread_cond_broadcast(&tp->dequeue_cond);
     for(int i = 0;i<tp->nthread;i++){
         pthread_join(tp->thread[i], NULL);
         printf("Thread %d joined.\n",i);
     }
-    sem_destroy(&tp->avaiable_slots);
     pthread_mutex_destroy(&tp->mutex);
-    pthread_cond_destroy(&tp->cond);
+    pthread_cond_destroy(&tp->enqueue_cond);
+    pthread_cond_destroy(&tp->dequeue_cond);
     destroy_queue(tp->job_queue);
     free(tp->thread);
     free(tp);
